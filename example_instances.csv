@@ -1,0 +1,5 @@
+instance_id,project_id,display_name,region,customer_code
+00000000-0000-0000-0000-000000000001,YOUR_PARENT_PROJECT_ID,MSSP Tenant 001 - Ministry of Communications,asia-southeast1,AGENCY001
+00000000-0000-0000-0000-000000000002,YOUR_PARENT_PROJECT_ID,MSSP Tenant 002 - Ministry of Finance,asia-southeast1,AGENCY002
+00000000-0000-0000-0000-000000000003,YOUR_PARENT_PROJECT_ID,MSSP Tenant 003 - Global Enterprise Core SIEM,asia-southeast1,CORP-CORE
+00000000-0000-0000-0000-000000000050,YOUR_PARENT_PROJECT_ID,MSSP Tenant 050 - Digital Services Platform,asia-southeast1,TENANT050

@@ -1,0 +1,5 @@
+secops>=0.44.1
+google-auth>=2.20.0
+google-api-python-client>=2.90.0
+flask>=3.0.0
+gunicorn>=21.2.0

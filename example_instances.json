@@ -1,0 +1,30 @@
+[
+  {
+    "instance_id": "00000000-0000-0000-0000-000000000001",
+    "project_id": "YOUR_PARENT_PROJECT_ID",
+    "display_name": "MSSP Tenant 001 - Ministry of Communications",
+    "region": "asia-southeast1",
+    "customer_code": "AGENCY001"
+  },
+  {
+    "instance_id": "00000000-0000-0000-0000-000000000002",
+    "project_id": "YOUR_PARENT_PROJECT_ID",
+    "display_name": "MSSP Tenant 002 - Ministry of Finance",
+    "region": "asia-southeast1",
+    "customer_code": "AGENCY002"
+  },
+  {
+    "instance_id": "00000000-0000-0000-0000-000000000003",
+    "project_id": "YOUR_PARENT_PROJECT_ID",
+    "display_name": "MSSP Tenant 003 - Global Enterprise Core SIEM",
+    "region": "asia-southeast1",
+    "customer_code": "CORP-CORE"
+  },
+  {
+    "instance_id": "00000000-0000-0000-0000-000000000050",
+    "project_id": "YOUR_PARENT_PROJECT_ID",
+    "display_name": "MSSP Tenant 050 - Digital Services Platform",
+    "region": "asia-southeast1",
+    "customer_code": "TENANT050"
+  }
+]

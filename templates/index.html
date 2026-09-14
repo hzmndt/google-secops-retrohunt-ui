@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google SecOps Multi-Tenant Retrohunt Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #f87171;
+    }
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .navbar {
+      background-color: var(--card-bg);
+      border-bottom: 1px solid var(--card-border);
+    }
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 0.75rem;
+    }
+    .card-header {
+      background-color: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--card-border);
+      font-weight: 600;
+    }
+    .metric-card {
+      padding: 1.25rem;
+      border-radius: 0.75rem;
+      background: linear-gradient(145deg, #1e293b, #0f172a);
+      border: 1px solid var(--card-border);
+    }
+    .metric-val {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .metric-label {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .table {
+      color: var(--text-main);
+      margin-bottom: 0;
+    }
+    .table th {
+      border-color: var(--card-border);
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+    }
+    .table td {
+      border-color: var(--card-border);
+      vertical-align: middle;
+    }
+    .badge-running { background-color: #0284c7; color: white; }
+    .badge-done { background-color: #059669; color: white; }
+    .badge-failed { background-color: #dc2626; color: white; }
+    .badge-pending { background-color: #475569; color: white; }
+    .log-box {
+      background-color: #0a0f1d;
+      border: 1px solid var(--card-border);
+      border-radius: 0.5rem;
+      height: 220px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.82rem;
+      padding: 0.75rem;
+      color: #38bdf8;
+    }
+    .form-control, .form-select {
+      background-color: #0f172a;
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+    }
+    .form-control:focus, .form-select:focus {
+      background-color: #0f172a;
+      border-color: var(--accent);
+      color: var(--text-main);
+      box-shadow: 0 0 0 0.25rem rgba(56, 189, 248, 0.25);
+    }
+    .btn-primary {
+      background-color: #0284c7;
+      border-color: #0284c7;
+    }
+    .btn-primary:hover {
+      background-color: #0369a1;
+      border-color: #0369a1;
+    }
+    .pulse {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 rgba(52, 211, 153, 0.4);
+      animation: pulse 1.8s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
+      70% { box-shadow: 0 0 0 10px rgba(52, 211, 153, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navbar -->
+  <nav class="navbar navbar-dark px-4 py-3">
+    <div class="container-fluid d-flex justify-content-between align-items-center">
+      <div class="d-flex align-items-center gap-3">
+        <i class="bi bi-shield-check text-info fs-3"></i>
+        <div>
+          <h5 class="mb-0 fw-bold">Google SecOps Multi-Tenant Retrohunt Dashboard</h5>
+          <small class="text-muted">High-Throughput Batch Automation (Max 3 Concurrent/Instance)</small>
+        </div>
+      </div>
+      <div class="d-flex align-items-center gap-3">
+        <span id="liveStatusBadge" class="badge bg-secondary px-3 py-2">STATUS: IDLE</span>
+        <span class="badge bg-dark border border-secondary text-info px-3 py-2">
+          <i class="bi bi-geo-alt-fill me-1"></i> {{ region }}
+        </span>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid px-4 py-4">
+
+    <!-- KPI Summary Row -->
+    <div class="row g-3 mb-4">
+      <div class="col-md-2">
+        <div class="metric-card">
+          <div class="metric-label">Target Tenants</div>
+          <div class="metric-val" id="metricTenants">0</div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="metric-card">
+          <div class="metric-label">Queued Jobs</div>
+          <div class="metric-val" id="metricTotalJobs">0</div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="metric-card">
+          <div class="metric-label">Completed Jobs</div>
+          <div class="metric-val text-success" id="metricCompletedJobs">0</div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="metric-card">
+          <div class="metric-label">Active / Running</div>
+          <div class="metric-val text-info" id="metricActiveJobs">0</div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="metric-card">
+          <div class="metric-label">Failed / Quota</div>
+          <div class="metric-val text-danger" id="metricFailedJobs">0</div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="metric-card">
+          <div class="metric-label">Total Detections</div>
+          <div class="metric-val text-warning" id="metricDetections">0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content Layout -->
+    <div class="row g-4">
+      
+      <!-- Left Column: Controls & Tenant Discovery -->
+      <div class="col-lg-4">
+        
+        <!-- Run Config Card -->
+        <div class="card mb-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-sliders me-2 text-info"></i>Retrohunt Configuration</span>
+          </div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label class="form-label text-muted small fw-bold">Parent MSSP Instance ID</label>
+              <input type="text" class="form-control form-control-sm font-monospace" id="inputParentInstance" value="{{ parent_instance }}">
+            </div>
+            <div class="mb-3">
+              <label class="form-label text-muted small fw-bold">Parent GCP Project ID</label>
+              <input type="text" class="form-control form-control-sm font-monospace" id="inputParentProject" value="{{ parent_project }}">
+            </div>
+            <div class="row g-2 mb-3">
+              <div class="col-6">
+                <label class="form-label text-muted small fw-bold">Rules / Tenant</label>
+                <input type="number" class="form-control form-control-sm" id="inputLimitRules" value="3" min="1" max="20">
+              </div>
+              <div class="col-6">
+                <label class="form-label text-muted small fw-bold">Time Window</label>
+                <select class="form-select form-select-sm" id="inputHours">
+                  <option value="6">Last 6 Hours</option>
+                  <option value="24" selected>Last 24 Hours</option>
+                  <option value="48">Last 48 Hours</option>
+                  <option value="168">Last 7 Days</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="checkSafeMode" checked>
+              <label class="form-check-label small" for="checkSafeMode">
+                Safe Mode (Disable SOAR Alert Storms)
+              </label>
+            </div>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="checkDryRun">
+              <label class="form-check-label small" for="checkDryRun">
+                Dry-Run Simulation (Validate without server load)
+              </label>
+            </div>
+            <div class="d-grid gap-2">
+              <button class="btn btn-outline-info btn-sm" id="btnDiscoverTenants">
+                <i class="bi bi-arrow-repeat me-1"></i> Refresh Tenant Discovery
+              </button>
+              <button class="btn btn-primary fw-bold" id="btnStartRetrohunt">
+                <i class="bi bi-play-fill me-1"></i> Start Batch Retrohunt
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Discovered Tenants Card -->
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-buildings me-2 text-info"></i>Discovered Tenants (<span id="tenantCount">0</span>)</span>
+            <div class="form-check mb-0">
+              <input class="form-check-input" type="checkbox" id="selectAllTenants" checked>
+              <label class="form-check-label small text-muted" for="selectAllTenants">All</label>
+            </div>
+          </div>
+          <div class="card-body p-0" style="max-height: 280px; overflow-y: auto;">
+            <ul class="list-group list-group-flush bg-transparent" id="tenantList">
+              <li class="list-group-item bg-transparent text-muted small py-3 text-center">
+                Click "Refresh Tenant Discovery" to populate child tenants.
+              </li>
+            </ul>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Right Column: Live Queue & Results -->
+      <div class="col-lg-8">
+
+        <!-- Active Jobs / Concurrency Pool -->
+        <div class="card mb-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-cpu me-2 text-info"></i>Active Sliding-Window Queue (Max 3 Jobs / Tenant)</span>
+            <span class="badge bg-dark border border-secondary text-muted" id="activeCountBadge">0 Active</span>
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th>Tenant</th>
+                    <th>Rule Candidate</th>
+                    <th>Rule ID</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                  </tr>
+                </thead>
+                <tbody id="activeJobsBody">
+                  <tr>
+                    <td colspan="5" class="text-center py-3 text-muted small">No retrohunt jobs currently executing.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Completed Results Table -->
+        <div class="card mb-4">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-check2-circle me-2 text-success"></i>Completed Retrohunt Results</span>
+            <span class="badge bg-dark border border-secondary text-muted" id="resultsCountBadge">0 Completed</span>
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
+              <table class="table table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th>Tenant</th>
+                    <th>Rule</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Detections</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="resultsBody">
+                  <tr>
+                    <td colspan="6" class="text-center py-3 text-muted small">Results will populate here as retrohunts complete.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Terminal Logs -->
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-terminal me-2 text-info"></i>Live Orchestration Logs</span>
+            <button class="btn btn-sm btn-link text-muted p-0 text-decoration-none" id="btnClearLogs">Clear</button>
+          </div>
+          <div class="card-body p-2">
+            <div class="log-box" id="logBox">
+              <div>[SYSTEM] Ready. Click "Start Batch Retrohunt" to initiate continuous execution.</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    let pollTimer = null;
+
+    async function fetchTenants() {
+      const parentInst = document.getElementById("inputParentInstance").value.trim();
+      const parentProj = document.getElementById("inputParentProject").value.trim();
+      const listEl = document.getElementById("tenantList");
+      listEl.innerHTML = '<li class="list-group-item bg-transparent text-muted small py-3 text-center"><div class="spinner-border spinner-border-sm text-info me-2"></div> Discovering child tenants via Partner API...</li>';
+
+      try {
+        const resp = await fetch(`/api/tenants?parent_instance=${parentInst}&parent_project=${parentProj}`);
+        const data = await resp.json();
+        if (data.status === "success") {
+          document.getElementById("tenantCount").innerText = data.count;
+          document.getElementById("metricTenants").innerText = data.count;
+          listEl.innerHTML = "";
+          data.tenants.forEach(t => {
+            const li = document.createElement("li");
+            li.className = "list-group-item bg-transparent text-light small d-flex justify-content-between align-items-center py-2";
+            li.innerHTML = `
+              <div class="form-check">
+                <input class="form-check-input tenant-checkbox" type="checkbox" value="${t.customer_id}" checked id="chk_${t.customer_id}">
+                <label class="form-check-label" for="chk_${t.customer_id}">
+                  <span class="fw-semibold">${t.display_name}</span>
+                  <br><span class="text-muted font-monospace" style="font-size: 0.75rem;">${t.customer_id} (${t.project_id})</span>
+                </label>
+              </div>
+              <span class="badge bg-dark border border-secondary">${t.customer_code || 'TENANT'}</span>
+            `;
+            listEl.appendChild(li);
+          });
+        } else {
+          listEl.innerHTML = `<li class="list-group-item bg-transparent text-danger small py-3 text-center">Discovery failed: ${data.message}</li>`;
+        }
+      } catch (err) {
+        listEl.innerHTML = `<li class="list-group-item bg-transparent text-danger small py-3 text-center">Network error: ${err.message}</li>`;
+      }
+    }
+
+    async function startRetrohunt() {
+      const parentInst = document.getElementById("inputParentInstance").value.trim();
+      const parentProj = document.getElementById("inputParentProject").value.trim();
+      const limitRules = parseInt(document.getElementById("inputLimitRules").value) || 3;
+      const hours = parseInt(document.getElementById("inputHours").value) || 24;
+      const safeMode = document.getElementById("checkSafeMode").checked;
+      const dryRun = document.getElementById("checkDryRun").checked;
+
+      const checkedBoxes = document.querySelectorAll(".tenant-checkbox:checked");
+      const tenantIds = Array.from(checkedBoxes).map(cb => cb.value);
+
+      const payload = {
+        parent_instance: parentInst,
+        parent_project: parentProj,
+        limit_rules: limitRules,
+        hours: hours,
+        safe_mode: safeMode,
+        dry_run: dryRun,
+        tenant_ids: tenantIds,
+      };
+
+      try {
+        const resp = await fetch("/api/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        if (res.status === "started") {
+          document.getElementById("btnStartRetrohunt").disabled = true;
+          document.getElementById("liveStatusBadge").className = "badge bg-primary px-3 py-2";
+          document.getElementById("liveStatusBadge").innerText = "STATUS: RUNNING";
+          pollStatus();
+        } else {
+          alert("Could not start retrohunt: " + res.message);
+        }
+      } catch (err) {
+        alert("Error invoking start API: " + err.message);
+      }
+    }
+
+    async function pollStatus() {
+      try {
+        const resp = await fetch("/api/status");
+        const state = await resp.json();
+
+        // Update KPIs
+        document.getElementById("metricTotalJobs").innerText = state.total_jobs;
+        document.getElementById("metricCompletedJobs").innerText = state.completed_jobs;
+        document.getElementById("metricFailedJobs").innerText = state.failed_jobs;
+        document.getElementById("metricDetections").innerText = state.total_detections;
+        const activeKeys = Object.keys(state.active_jobs);
+        document.getElementById("metricActiveJobs").innerText = activeKeys.length;
+        document.getElementById("activeCountBadge").innerText = `${activeKeys.length} Active`;
+        document.getElementById("resultsCountBadge").innerText = `${state.results.length} Completed`;
+
+        // Status badge
+        const badge = document.getElementById("liveStatusBadge");
+        if (state.status === "RUNNING") {
+          badge.className = "badge bg-primary px-3 py-2";
+          badge.innerHTML = '<span class="pulse me-2"></span>RUNNING';
+          document.getElementById("btnStartRetrohunt").disabled = true;
+        } else if (state.status === "COMPLETED") {
+          badge.className = "badge bg-success px-3 py-2";
+          badge.innerText = "STATUS: COMPLETED";
+          document.getElementById("btnStartRetrohunt").disabled = false;
+        } else if (state.status === "FAILED") {
+          badge.className = "badge bg-danger px-3 py-2";
+          badge.innerText = "STATUS: FAILED";
+          document.getElementById("btnStartRetrohunt").disabled = false;
+        } else {
+          badge.className = "badge bg-secondary px-3 py-2";
+          badge.innerText = "STATUS: IDLE";
+          document.getElementById("btnStartRetrohunt").disabled = false;
+        }
+
+        // Render Active Jobs
+        const activeBody = document.getElementById("activeJobsBody");
+        if (activeKeys.length === 0) {
+          activeBody.innerHTML = '<tr><td colspan="5" class="text-center py-3 text-muted small">No retrohunt jobs currently executing.</td></tr>';
+        } else {
+          activeBody.innerHTML = "";
+          activeKeys.forEach(k => {
+            const job = state.active_jobs[k];
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td class="fw-semibold">${job.instance_name}</td>
+              <td>${job.rule_name}</td>
+              <td><code class="text-info">${job.rule_id}</code></td>
+              <td><span class="badge badge-running"><span class="spinner-grow spinner-grow-sm me-1"></span>Running</span></td>
+              <td class="text-muted small">${job.started_at.split('T')[1].split('.')[0]}</td>
+            `;
+            activeBody.appendChild(tr);
+          });
+        }
+
+        // Render Results Table
+        const resBody = document.getElementById("resultsBody");
+        if (state.results.length === 0) {
+          resBody.innerHTML = '<tr><td colspan="6" class="text-center py-3 text-muted small">Results will populate here as retrohunts complete.</td></tr>';
+        } else {
+          resBody.innerHTML = "";
+          state.results.forEach(r => {
+            const tr = document.createElement("tr");
+            const badgeClass = r.status === "DONE" ? "badge-done" : "badge-failed";
+            tr.innerHTML = `
+              <td class="fw-semibold">${r.instance_name}</td>
+              <td>${r.rule_name}</td>
+              <td><span class="badge ${badgeClass}">${r.status}</span></td>
+              <td>${r.duration_seconds}s</td>
+              <td><strong class="${r.detection_count > 0 ? 'text-warning' : 'text-muted'}">${r.detection_count}</strong></td>
+              <td class="small text-muted">${r.error_message || 'Success'}</td>
+            `;
+            resBody.appendChild(tr);
+          });
+        }
+
+        // Render Logs
+        const logBox = document.getElementById("logBox");
+        if (state.logs && state.logs.length > 0) {
+          logBox.innerHTML = state.logs.map(l => `<div>${l}</div>`).join("");
+          logBox.scrollTop = logBox.scrollHeight;
+        }
+
+      } catch (err) {
+        console.error("Poll error:", err);
+      }
+    }
+
+    document.getElementById("btnDiscoverTenants").addEventListener("click", fetchTenants);
+    document.getElementById("btnStartRetrohunt").addEventListener("click", startRetrohunt);
+    document.getElementById("selectAllTenants").addEventListener("change", function() {
+      document.querySelectorAll(".tenant-checkbox").forEach(cb => cb.checked = this.checked);
+    });
+    document.getElementById("btnClearLogs").addEventListener("click", function() {
+      document.getElementById("logBox").innerHTML = "<div>[SYSTEM] Log display cleared.</div>";
+    });
+
+    // Auto-discover tenants on initial load
+    window.addEventListener("DOMContentLoaded", () => {
+      fetchTenants();
+      setInterval(pollStatus, 3000);
+    });
+  </script>
+</body>
+</html>

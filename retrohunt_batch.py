@@ -361,7 +361,7 @@ class SecOpsInstanceOrchestrator:
 
     def stage_rule(self, rule_item: RuleItem) -> Tuple[bool, Optional[str], Optional[str]]:
         """Ensures the rule exists in this instance, creating it safely if missing."""
-        if rule_item.rule_id and rule_item.rule_id in self.existing_rules.values():
+        if rule_item.rule_id:
             return True, rule_item.rule_id, None
 
         if rule_item.display_name in self.existing_rules:
@@ -705,6 +705,56 @@ class MultiTenantRetrohuntOrchestrator:
         logging.info(f"Selected {len(rule_items)} valid rule candidate(s).")
         return rule_items
 
+    def load_rules_from_instances(
+        self,
+        rule_filter: Optional[str] = None,
+        rule_ids: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[RuleItem]:
+        """Fetch existing rules directly from target instance(s) without requiring local files."""
+        collected_rules: Dict[str, RuleItem] = {}
+        pattern = re.compile(rule_filter, re.IGNORECASE) if rule_filter else None
+        target_ids = set(rule_ids) if rule_ids else None
+
+        for inst in self.instances:
+            logging.info(f"[{inst.display_name}] Fetching deployed rules from Chronicle...")
+            try:
+                chronicle = self.secops_client.chronicle(
+                    customer_id=inst.customer_id,
+                    project_id=inst.project_id,
+                    region=inst.region,
+                )
+                res = chronicle.list_rules(page_size=500)
+                rules_raw = res.get("rules", [])
+                for r in rules_raw:
+                    dname = r.get("displayName")
+                    rname = r.get("name", "")
+                    rid = rname.split("/")[-1] if rname else None
+                    if not dname or not rid:
+                        continue
+                    if target_ids and rid not in target_ids:
+                        continue
+                    if pattern and not pattern.search(dname) and not pattern.search(rid):
+                        continue
+
+                    if dname not in collected_rules:
+                        collected_rules[dname] = RuleItem(
+                            display_name=dname,
+                            rule_id=rid,
+                            category="instance_rule",
+                        )
+                    if limit and len(collected_rules) >= limit:
+                        break
+            except Exception as e:
+                logging.warning(f"[{inst.display_name}] Failed to list instance rules: {e}")
+
+            if limit and len(collected_rules) >= limit:
+                break
+
+        rule_items = list(collected_rules.values())
+        logging.info(f"Loaded {len(rule_items)} deployed rule(s) from target instance(s).")
+        return rule_items
+
     def _process_single_instance(
         self,
         instance: InstanceTarget,
@@ -738,9 +788,26 @@ class MultiTenantRetrohuntOrchestrator:
 
         if dry_run:
             for idx, item in enumerate(pending_rules, 1):
-                exists = item.display_name in inst_orchestrator.existing_rules
+                exists = (item.rule_id is not None) or (item.display_name in inst_orchestrator.existing_rules)
                 status = "DEPLOYED" if exists else "NEEDS_CREATION"
                 print(f"[{instance.display_name}] [{idx}/{len(pending_rules)}] {item.display_name} -> {status}")
+                with self.results_lock:
+                    self.results.append(
+                        RetrohuntResult(
+                            rule_name=item.display_name,
+                            rule_id=item.rule_id or ("EXISTS" if exists else "NEEDS_CREATION"),
+                            instance_id=instance.customer_id,
+                            instance_name=instance.display_name,
+                            file_path=item.file_path,
+                            category=item.category,
+                            status="DRY_RUN",
+                            start_time=format_rfc3339(start_time),
+                            end_time=format_rfc3339(end_time),
+                            duration_seconds=0.0,
+                            detection_count=0,
+                            error_message=f"Dry-run check: {status}",
+                        )
+                    )
             return
 
         # Queue-based continuous batch execution: automatically executes up to 3 rules at a time
@@ -838,7 +905,7 @@ class MultiTenantRetrohuntOrchestrator:
         lines.append(sep)
 
         total_detections = 0
-        status_counts = {"DONE": 0, "FAILED": 0, "SKIPPED": 0, "TIMEOUT": 0, "CANCELED": 0}
+        status_counts = {"DONE": 0, "FAILED": 0, "SKIPPED": 0, "TIMEOUT": 0, "CANCELED": 0, "DRY_RUN": 0}
 
         for r in self.results:
             status_counts[r.status] = status_counts.get(r.status, 0) + 1
@@ -853,6 +920,7 @@ class MultiTenantRetrohuntOrchestrator:
         lines.append(f"TOTAL INSTANCES: {len(self.instances)} | TOTAL RUNS: {len(self.results)}")
         lines.append(
             f"OUTCOMES: Done: {status_counts.get('DONE', 0)}, "
+            f"Dry-Run: {status_counts.get('DRY_RUN', 0)}, "
             f"Failed: {status_counts.get('FAILED', 0)}, "
             f"Skipped: {status_counts.get('SKIPPED', 0)}, "
             f"Timeout: {status_counts.get('TIMEOUT', 0)}"
@@ -994,6 +1062,21 @@ Examples:
         "--rules-dir",
         type=str,
         help="Directory of YARA-L detection rules (e.g. detection-rules/rules/community)",
+    )
+    source_group.add_argument(
+        "--use-instance-rules",
+        action="store_true",
+        help="Use rules already deployed in target Chronicle instance(s) without needing local files",
+    )
+    source_group.add_argument(
+        "--rule-filter",
+        type=str,
+        help="Regex filter on deployed rule displayName or rule ID (e.g. '(?i)tinyrct|vpn')",
+    )
+    source_group.add_argument(
+        "--rule-ids",
+        type=str,
+        help="Comma-separated list of specific Chronicle rule IDs to retrohunt (e.g. 'ru_xxx,ru_yyy')",
     )
     source_group.add_argument(
         "--rules-pattern",
@@ -1173,22 +1256,36 @@ Examples:
 
     # Load Detection Rules
     rules_to_hunt: List[RuleItem] = []
-    rules_dir = args.rules_dir
-    if not rules_dir and os.path.exists("detection-rules/rules/community"):
-        rules_dir = "detection-rules/rules/community"
-    elif not rules_dir and os.path.exists("/usr/local/google/home/hzmndt/Google/detection-rules/rules/community"):
-        rules_dir = "/usr/local/google/home/hzmndt/Google/detection-rules/rules/community"
 
-    if rules_dir:
-        rules_to_hunt = orchestrator.load_rules_from_directory(
-            directory_path=rules_dir,
-            pattern=args.rules_pattern,
-            category_filter=args.category,
+    # 1. Fetch deployed rules directly from target instances
+    if args.use_instance_rules or args.rule_filter or args.rule_ids:
+        r_ids = [x.strip() for x in args.rule_ids.split(",")] if args.rule_ids else None
+        rules_to_hunt = orchestrator.load_rules_from_instances(
+            rule_filter=args.rule_filter,
+            rule_ids=r_ids,
             limit=args.limit,
         )
+    # 2. Load from local rules directory
     else:
-        logging.error("No rule directory found. Please specify --rules-dir.")
-        sys.exit(1)
+        rules_dir = args.rules_dir
+        if not rules_dir and os.path.exists("detection-rules/rules/community"):
+            rules_dir = "detection-rules/rules/community"
+        elif not rules_dir and os.path.exists("/usr/local/google/home/hzmndt/Google/detection-rules/rules/community"):
+            rules_dir = "/usr/local/google/home/hzmndt/Google/detection-rules/rules/community"
+
+        if rules_dir:
+            rules_to_hunt = orchestrator.load_rules_from_directory(
+                directory_path=rules_dir,
+                pattern=args.rules_pattern,
+                category_filter=args.category,
+                limit=args.limit,
+            )
+        else:
+            logging.error(
+                "No rule source provided. Please specify --rules-dir to load local files, "
+                "or --use-instance-rules / --rule-filter to hunt rules already in Chronicle."
+            )
+            sys.exit(1)
 
     if not rules_to_hunt:
         logging.warning("No candidate rules found to retrohunt.")

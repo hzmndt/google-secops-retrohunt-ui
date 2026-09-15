@@ -71,22 +71,12 @@ DEFAULT_CRED_PATH = os.getenv(
 
 def create_secops_client(credentials_path: Optional[str] = None) -> SecOpsClient:
     """Instantiate SecOpsClient with cloud-platform and chronicle-backstory scopes."""
-    scopes = [
-        "https://www.googleapis.com/auth/cloud-platform",
-        "https://www.googleapis.com/auth/chronicle-backstory",
-    ]
     if credentials_path and os.path.exists(credentials_path):
-        from google.oauth2 import service_account
-        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        return SecOpsClient(credentials=creds)
+        return SecOpsClient(service_account_path=credentials_path)
     elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
-        from google.oauth2 import service_account
-        creds = service_account.Credentials.from_service_account_file(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], scopes=scopes)
-        return SecOpsClient(credentials=creds)
+        return SecOpsClient(service_account_path=os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
     else:
-        import google.auth
-        creds, _ = google.auth.default(scopes=scopes)
-        return SecOpsClient(credentials=creds)
+        return SecOpsClient()
 
 # Hard limit for Google SecOps per individual instance
 MAX_CONCURRENT_PER_INSTANCE = 3
@@ -1179,14 +1169,14 @@ Examples:
         start_time = parse_rfc3339(args.start_time)
         end_time = parse_rfc3339(args.end_time)
     elif args.hours:
-        end_time = now_utc
-        start_time = now_utc - timedelta(hours=args.hours)
+        end_time = now_utc - timedelta(hours=1)
+        start_time = end_time - timedelta(hours=args.hours)
     elif args.days:
-        end_time = now_utc
-        start_time = now_utc - timedelta(days=args.days)
+        end_time = now_utc - timedelta(hours=1)
+        start_time = end_time - timedelta(days=args.days)
     else:
-        end_time = now_utc
-        start_time = now_utc - timedelta(hours=24)
+        end_time = now_utc - timedelta(hours=1)
+        start_time = end_time - timedelta(hours=24)
 
     if start_time >= end_time:
         logging.error(f"Invalid time window: start_time ({start_time}) >= end_time ({end_time}).")

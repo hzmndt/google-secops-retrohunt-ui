@@ -147,17 +147,26 @@ gcloud run deploy secops-retrohunt-ui \
 
 ## Required IAM Permissions
 
-Assign **Chronicle API Editor** (`roles/chronicle.editor`) to the service account, or configure a least-privilege role with:
+For multi-tenant and scoped environments, assign **`roles/chronicle.admin`** (which includes `chronicle.dataAccessScopes.permit`), or configure a least-privilege custom role with the verified permissions:
 * `chronicle.tenants.list`
 * `chronicle.instances.get`
+* `chronicle.dataAccessScopes.permit` (CRITICAL for rules bound to custom scopes)
+* `chronicle.globalDataAccessScopes.permit` (for global/unscoped rules)
+* `chronicle.dataAccessScopes.list`
 * `chronicle.rules.list`
 * `chronicle.rules.get`
+* `chronicle.rules.create`
+* `chronicle.rules.delete`
+* `chronicle.rules.listRevisions`
+* `chronicle.rules.verifyRuleText`
 * `chronicle.ruleDeployments.get`
 * `chronicle.ruleDeployments.update`
 * `chronicle.retrohunts.create`
 * `chronicle.retrohunts.get`
 * `chronicle.retrohunts.list`
-* `chronicle.detections.list`
+* `chronicle.legacies.legacySearchDetections`
+* `chronicle.legacies.legacyTestRuleStreaming`
+* `chronicle.operations.get`
 
 ---
 

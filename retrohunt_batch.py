@@ -1061,7 +1061,7 @@ Examples:
     source_group.add_argument(
         "--rule-filter",
         type=str,
-        help="Regex filter on deployed rule displayName or rule ID (e.g. '(?i)tinyrct|vpn')",
+        help="Regex filter on deployed rule displayName or rule ID (e.g. '(?i)ransomware|vpn')",
     )
     source_group.add_argument(
         "--rule-ids",

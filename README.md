@@ -135,7 +135,7 @@ gcloud run deploy secops-retrohunt-ui \
 ### Example `/api/start` Payload
 ```json
 {
-  "tenant_ids": ["ad390129-a027-4b65-bc30-3213e7a2d8f7"],
+  "tenant_ids": ["00000000-0000-0000-0000-000000000001"],
   "limit_rules": 5,
   "hours": 24,
   "dry_run": false,

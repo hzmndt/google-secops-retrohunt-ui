@@ -2,16 +2,16 @@
   {
     "instance_id": "00000000-0000-0000-0000-000000000001",
     "project_id": "YOUR_PARENT_PROJECT_ID",
-    "display_name": "MSSP Tenant 001 - Ministry of Communications",
+    "display_name": "MSSP Tenant 001 - Retail Operations",
     "region": "asia-southeast1",
-    "customer_code": "AGENCY001"
+    "customer_code": "CORP001"
   },
   {
     "instance_id": "00000000-0000-0000-0000-000000000002",
     "project_id": "YOUR_PARENT_PROJECT_ID",
-    "display_name": "MSSP Tenant 002 - Ministry of Finance",
+    "display_name": "MSSP Tenant 002 - Finance Division",
     "region": "asia-southeast1",
-    "customer_code": "AGENCY002"
+    "customer_code": "CORP002"
   },
   {
     "instance_id": "00000000-0000-0000-0000-000000000003",

@@ -704,37 +704,95 @@ class MultiTenantRetrohuntOrchestrator:
         """Fetch existing rules directly from target instance(s) without requiring local files."""
         collected_rules: Dict[str, RuleItem] = {}
         pattern = re.compile(rule_filter, re.IGNORECASE) if rule_filter else None
-        target_ids = set(rule_ids) if rule_ids else None
+        target_ids = [x.strip() for x in rule_ids if x.strip()] if rule_ids else None
 
         for inst in self.instances:
-            logging.info(f"[{inst.display_name}] Fetching deployed rules from Chronicle...")
             try:
                 chronicle = self.secops_client.chronicle(
                     customer_id=inst.customer_id,
                     project_id=inst.project_id,
                     region=inst.region,
                 )
-                res = chronicle.list_rules(page_size=500)
-                rules_raw = res.get("rules", [])
-                for r in rules_raw:
-                    dname = r.get("displayName")
-                    rname = r.get("name", "")
-                    rid = rname.split("/")[-1] if rname else None
-                    if not dname or not rid:
-                        continue
-                    if target_ids and rid not in target_ids:
-                        continue
-                    if pattern and not pattern.search(dname) and not pattern.search(rid):
-                        continue
 
-                    if dname not in collected_rules:
-                        collected_rules[dname] = RuleItem(
-                            display_name=dname,
-                            rule_id=rid,
-                            category="instance_rule",
-                        )
+                # Path A: Specific Rule IDs provided -> Lookup directly by ID
+                if target_ids:
+                    logging.info(f"[{inst.display_name}] Looking up {len(target_ids)} specific rule ID(s) directly...")
+                    for rid in target_ids:
+                        try:
+                            rule = chronicle.get_rule(rid)
+                            dname = rule.get("displayName") or rid
+                            if pattern and not pattern.search(dname) and not pattern.search(rid):
+                                continue
+                            if dname not in collected_rules:
+                                collected_rules[dname] = RuleItem(
+                                    display_name=dname,
+                                    rule_id=rid,
+                                    category="instance_rule",
+                                )
+                                logging.info(f"[{inst.display_name}] Found rule '{dname}' ({rid}).")
+                        except Exception as e:
+                            err_str = str(e)
+                            if "access to scope" in err_str.lower() or "403" in err_str:
+                                logging.error(
+                                    f"[{inst.display_name}] PERMISSION ERROR on rule '{rid}': HTTP 403 'user does not have access to scope'.\n"
+                                    f"  -> Cause: The Service Account lacks access to this rule's Data Access Scope.\n"
+                                    f"  -> Fix 1 (GCP IAM): Ensure the Service Account has 'chronicle.dataAccessScopes.permit' (included in 'roles/chronicle.admin').\n"
+                                    f"  -> Fix 2 (SecOps UI): In Chronicle -> Settings -> Access Control -> Data Access Scopes, assign the Service Account to the rule's scope."
+                                )
+                            elif "404" in err_str or "not found" in err_str.lower():
+                                logging.warning(f"[{inst.display_name}] Rule '{rid}' not found in instance.")
+                            else:
+                                logging.warning(f"[{inst.display_name}] Failed to fetch rule '{rid}': {e}")
+                    continue
+
+                # Path B: Scan deployed rules with filter and full pagination
+                logging.info(f"[{inst.display_name}] Fetching deployed rules from Chronicle...")
+                total_scanned = 0
+                page_token = None
+
+                while True:
+                    res = chronicle.list_rules(page_size=1000, page_token=page_token)
+                    rules_raw = res.get("rules", [])
+                    total_scanned += len(rules_raw)
+
+                    for r in rules_raw:
+                        dname = r.get("displayName")
+                        rname = r.get("name", "")
+                        rid = rname.split("/")[-1] if rname else None
+                        if not dname or not rid:
+                            continue
+                        if pattern and not pattern.search(dname) and not pattern.search(rid):
+                            continue
+
+                        if dname not in collected_rules:
+                            collected_rules[dname] = RuleItem(
+                                display_name=dname,
+                                rule_id=rid,
+                                category="instance_rule",
+                            )
+                        if limit and len(collected_rules) >= limit:
+                            break
+
                     if limit and len(collected_rules) >= limit:
                         break
+
+                    page_token = res.get("nextPageToken")
+                    if not page_token or not rules_raw:
+                        break
+
+                if total_scanned == 0:
+                    logging.warning(
+                        f"[{inst.display_name}] Chronicle returned 0 total rules visible to this account.\n"
+                        f"  Diagnostic check:\n"
+                        f"  1. In GCP IAM: Does the Service Account have 'roles/chronicle.admin' on the GCP project hosting this instance? ('roles/chronicle.editor' lacks 'chronicle.dataAccessScopes.permit' required for scoped rules).\n"
+                        f"  2. In Chronicle UI -> Settings -> Access Control -> Data Access Scopes: Is the Service Account assigned to the scope governing these rules? (Rules under custom scopes are silently filtered out from rules.list if unassigned)."
+                    )
+                else:
+                    logging.info(
+                        f"[{inst.display_name}] Scanned {total_scanned} rule(s) in Chronicle, "
+                        f"matched {len(collected_rules)} rule(s) with filter '{rule_filter}'."
+                    )
+
             except Exception as e:
                 logging.warning(f"[{inst.display_name}] Failed to list instance rules: {e}")
 

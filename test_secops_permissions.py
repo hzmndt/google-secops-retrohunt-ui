@@ -26,6 +26,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -124,6 +125,7 @@ def run_permission_diagnostic(
     target: Dict[str, str],
     sa_identity: Dict[str, Any],
     probe_rule_id: Optional[str] = None,
+    rule_filter: Optional[str] = None,
 ) -> List[TestResult]:
     """Runs functional probes against Chronicle APIs to verify each permission."""
     results: List[TestResult] = []
@@ -234,32 +236,82 @@ def run_permission_diagnostic(
         ))
 
     # -------------------------------------------------------------
-    # 3. Detection Rules Listing (chronicle.rules.list)
+    # 3. Detection Rules Listing & Filtering (chronicle.rules.list)
     # -------------------------------------------------------------
     first_rule_id = None
     first_rule_name = None
+    matched_rules: List[tuple] = []
+    total_scanned = 0
+    pattern = re.compile(rule_filter, re.IGNORECASE) if rule_filter else None
+
     try:
-        r_rules = chronicle.list_rules(page_size=50)
-        rules_list = r_rules.get("rules", [])
-        if len(rules_list) > 0:
-            first_rule = rules_list[0]
-            first_rule_name = first_rule.get("displayName")
-            rname = first_rule.get("name", "")
-            first_rule_id = rname.split("/")[-1] if rname else None
-            results.append(TestResult(
-                domain="Detection Rules",
-                permission="chronicle.rules.list",
-                passed=True,
-                status_label="PASS",
-                message=f"Successfully listed rules (Page 1 returned {len(rules_list)} rules).",
-            ))
+        page_token = None
+        while True:
+            r_rules = chronicle.list_rules(page_size=1000, page_token=page_token)
+            rules_list = r_rules.get("rules", [])
+            total_scanned += len(rules_list)
+
+            for r in rules_list:
+                dname = r.get("displayName")
+                rname = r.get("name", "")
+                rid = rname.split("/")[-1] if rname else None
+                if not dname or not rid:
+                    continue
+
+                if pattern:
+                    if pattern.search(dname) or pattern.search(rid):
+                        matched_rules.append((dname, rid))
+                else:
+                    if len(matched_rules) < 5:
+                        matched_rules.append((dname, rid))
+
+            page_token = r_rules.get("nextPageToken")
+            if not page_token or not rules_list:
+                break
+            # If no filter is specified, page 1 (up to 1000 rules) is sufficient for permission check
+            if not pattern:
+                break
+
+        if total_scanned > 0:
+            if pattern:
+                if matched_rules:
+                    first_rule_name, first_rule_id = matched_rules[0]
+                    sample_str = ", ".join([f"'{m[0]}'" for m in matched_rules[:3]])
+                    if len(matched_rules) > 3:
+                        sample_str += f" and {len(matched_rules) - 3} more"
+                    results.append(TestResult(
+                        domain="Detection Rules",
+                        permission="chronicle.rules.list",
+                        passed=True,
+                        status_label="PASS",
+                        message=f"Scanned {total_scanned} rules; found {len(matched_rules)} rule(s) matching '{rule_filter}': {sample_str}.",
+                    ))
+                else:
+                    results.append(TestResult(
+                        domain="Detection Rules",
+                        permission="chronicle.rules.list",
+                        passed=False,
+                        status_label="WARN",
+                        message=f"Scanned {total_scanned} rules, but 0 matched filter '{rule_filter}'. If these rules exist, they belong to an unassigned Data Access Scope.",
+                        remedy_iam=f"gcloud projects add-iam-policy-binding {proj_id} --member='serviceAccount:{sa_email}' --role='roles/chronicle.admin'",
+                        remedy_secops_ui=f"Chronicle silently filters out scoped rules from rules.list if unassigned. Check Chronicle UI -> Settings -> Access Control -> Data Access Scopes to verify if rules matching '{rule_filter}' belong to a restricted scope.",
+                    ))
+            else:
+                first_rule_name, first_rule_id = matched_rules[0]
+                results.append(TestResult(
+                    domain="Detection Rules",
+                    permission="chronicle.rules.list",
+                    passed=True,
+                    status_label="PASS",
+                    message=f"Successfully listed rules ({total_scanned} visible rule(s) in Chronicle).",
+                ))
         else:
             results.append(TestResult(
                 domain="Detection Rules",
                 permission="chronicle.rules.list",
                 passed=False,
                 status_label="WARN",
-                message="Chronicle returned 0 rules. If rules exist, this account lacks scope access or 'chronicle.rules.list'.",
+                message="Chronicle returned 0 total rules. If rules exist, this account lacks scope assignment or 'chronicle.rules.list'.",
                 remedy_iam=f"gcloud projects add-iam-policy-binding {proj_id} --member='serviceAccount:{sa_email}' --role='roles/chronicle.admin'",
                 remedy_secops_ui="Chronicle silently filters out scoped rules from rules.list if the Service Account is not assigned to their Data Access Scope. Go to Chronicle Settings -> Access Control -> Data Access Scopes to assign.",
             ))
@@ -562,6 +614,11 @@ def main():
         help="Chronicle region (default: asia-southeast1)",
     )
     parser.add_argument(
+        "--rule-filter",
+        type=str,
+        help="Regex filter on deployed rule names or IDs (e.g. '(?i)hac|mse')",
+    )
+    parser.add_argument(
         "--rule-id",
         type=str,
         help="Specific Chronicle rule ID to probe for Data Access Scope access (e.g. ru_b0e4c1eb-7335-4902-b933-8cc1bee32cad)",
@@ -597,6 +654,7 @@ def main():
             target=target,
             sa_identity=sa_identity,
             probe_rule_id=args.rule_id,
+            rule_filter=args.rule_filter,
         )
         print_diagnostic_report(target, sa_identity, results)
 

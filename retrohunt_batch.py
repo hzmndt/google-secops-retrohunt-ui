@@ -124,6 +124,23 @@ class RetrohuntResult:
     sample_detections: List[Dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class RuleDeployResult:
+    """Output details and status for a single rule deployment / save operation."""
+    rule_name: str
+    rule_id: str
+    instance_id: str
+    instance_name: str
+    file_path: Optional[str]
+    category: str
+    action: str  # CREATED, UPDATED, UNCHANGED, DRY_RUN, FAILED, VALIDATION_ERROR
+    revision_id: Optional[str] = None
+    enabled: Optional[bool] = None
+    alerting: Optional[bool] = None
+    error_message: Optional[str] = None
+
+
+
 def parse_rfc3339(date_str: str) -> datetime:
     """Parse RFC 3339 / ISO 8601 string to timezone-aware UTC datetime."""
     clean_str = date_str.strip()
@@ -349,16 +366,21 @@ class SecOpsInstanceOrchestrator:
                 break
         logging.info(f"[{self.instance.display_name}] Cached {count} deployed rule(s).")
 
-    def stage_rule(self, rule_item: RuleItem) -> Tuple[bool, Optional[str], Optional[str]]:
-        """Ensures the rule exists in this instance, creating it safely if missing."""
-        if rule_item.rule_id:
-            return True, rule_item.rule_id, None
+    def stage_rule(
+        self,
+        rule_item: RuleItem,
+        update_existing: bool = False,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """Ensures the rule exists in this instance, creating it if missing or updating if requested."""
+        rule_id = rule_item.rule_id or self.existing_rules.get(rule_item.display_name)
 
-        if rule_item.display_name in self.existing_rules:
-            rule_id = self.existing_rules[rule_item.display_name]
+        # If rule already exists and update is not requested, return existing ID
+        if rule_id and not update_existing:
             return True, rule_id, None
 
         if not rule_item.rule_text:
+            if rule_id:
+                return True, rule_id, None
             return False, None, f"Rule '{rule_item.display_name}' not in instance and has no rule text."
 
         # Validate syntax
@@ -368,6 +390,15 @@ class SecOpsInstanceOrchestrator:
                 return False, None, f"Validation failed: {val.message}"
         except Exception as e:
             return False, None, f"Validate API error: {e}"
+
+        # If rule exists and update_existing is True, update rule content
+        if rule_id and update_existing:
+            try:
+                updated = self.chronicle.update_rule(rule_id, rule_item.rule_text)
+                logging.info(f"[{self.instance.display_name}] Updated existing rule '{rule_item.display_name}' ({rule_id}).")
+                return True, rule_id, None
+            except Exception as e:
+                return False, None, f"Update rule failed: {e}"
 
         # Create rule in disabled / non-alerting state
         try:
@@ -382,6 +413,139 @@ class SecOpsInstanceOrchestrator:
             return True, rule_id, None
         except Exception as e:
             return False, None, f"Create rule failed: {e}"
+
+    def deploy_rule(
+        self,
+        rule_item: RuleItem,
+        update_existing: bool = True,
+        enable_rule: Optional[bool] = None,
+        enable_alerting: Optional[bool] = None,
+        dry_run: bool = False,
+    ) -> RuleDeployResult:
+        """Deploys or saves a rule directly into this Chronicle instance."""
+        rule_name = rule_item.display_name
+        inst_name = self.instance.display_name
+        inst_id = self.instance.customer_id
+        file_path = rule_item.file_path
+        category = rule_item.category
+
+        if not rule_item.rule_text:
+            return RuleDeployResult(
+                rule_name=rule_name,
+                rule_id=rule_item.rule_id or "UNKNOWN",
+                instance_id=inst_id,
+                instance_name=inst_name,
+                file_path=file_path,
+                category=category,
+                action="FAILED",
+                error_message="No rule text available to deploy.",
+            )
+
+        # 1. Validate syntax
+        try:
+            val = self.chronicle.validate_rule(rule_item.rule_text)
+            if not val.success:
+                return RuleDeployResult(
+                    rule_name=rule_name,
+                    rule_id=rule_item.rule_id or "INVALID",
+                    instance_id=inst_id,
+                    instance_name=inst_name,
+                    file_path=file_path,
+                    category=category,
+                    action="VALIDATION_ERROR",
+                    error_message=f"Validation error: {val.message}",
+                )
+        except Exception as e:
+            return RuleDeployResult(
+                rule_name=rule_name,
+                rule_id=rule_item.rule_id or "ERROR",
+                instance_id=inst_id,
+                instance_name=inst_name,
+                file_path=file_path,
+                category=category,
+                action="VALIDATION_ERROR",
+                error_message=f"Validate API call failed: {e}",
+            )
+
+        existing_rule_id = rule_item.rule_id or self.existing_rules.get(rule_name)
+
+        if dry_run:
+            action_preview = "DRY_RUN (WOULD_UPDATE)" if existing_rule_id else "DRY_RUN (WOULD_CREATE)"
+            return RuleDeployResult(
+                rule_name=rule_name,
+                rule_id=existing_rule_id or "NEW_RULE",
+                instance_id=inst_id,
+                instance_name=inst_name,
+                file_path=file_path,
+                category=category,
+                action=action_preview,
+                enabled=enable_rule,
+                alerting=enable_alerting,
+            )
+
+        target_rule_id = existing_rule_id
+        action_taken = "UNCHANGED"
+        revision_id = None
+
+        # 2. Create or Update Rule
+        try:
+            if existing_rule_id:
+                if update_existing:
+                    upd_res = self.chronicle.update_rule(existing_rule_id, rule_item.rule_text)
+                    revision_id = upd_res.get("revisionId") or upd_res.get("revisionCreateTime")
+                    action_taken = "UPDATED"
+                    logging.info(f"[{inst_name}] Successfully updated rule '{rule_name}' ({existing_rule_id}).")
+                else:
+                    action_taken = "UNCHANGED"
+                    logging.info(f"[{inst_name}] Rule '{rule_name}' already exists ({existing_rule_id}); update not requested.")
+            else:
+                create_res = self.chronicle.create_rule(rule_item.rule_text)
+                rname = create_res.get("name", "")
+                target_rule_id = rname.split("/")[-1] if rname else None
+                if not target_rule_id:
+                    raise APIError(f"Created rule response missing rule ID: {create_res}")
+                revision_id = create_res.get("revisionId") or create_res.get("revisionCreateTime")
+                self.existing_rules[rule_name] = target_rule_id
+                action_taken = "CREATED"
+                logging.info(f"[{inst_name}] Successfully created rule '{rule_name}' as {target_rule_id}.")
+        except Exception as e:
+            logging.error(f"[{inst_name}] Failed saving rule '{rule_name}': {e}")
+            return RuleDeployResult(
+                rule_name=rule_name,
+                rule_id=target_rule_id or "UNKNOWN",
+                instance_id=inst_id,
+                instance_name=inst_name,
+                file_path=file_path,
+                category=category,
+                action="FAILED",
+                error_message=str(e),
+            )
+
+        # 3. Configure Deployment State (enabled / alerting) if requested
+        if target_rule_id and (enable_rule is not None or enable_alerting is not None):
+            try:
+                kwargs = {}
+                if enable_rule is not None:
+                    kwargs["enabled"] = enable_rule
+                if enable_alerting is not None:
+                    kwargs["alerting"] = enable_alerting
+                self.chronicle.update_rule_deployment(target_rule_id, **kwargs)
+                logging.info(f"[{inst_name}] Configured deployment for '{rule_name}' ({target_rule_id}): {kwargs}")
+            except Exception as e:
+                logging.warning(f"[{inst_name}] Could not update deployment settings for '{rule_name}': {e}")
+
+        return RuleDeployResult(
+            rule_name=rule_name,
+            rule_id=target_rule_id or "UNKNOWN",
+            instance_id=inst_id,
+            instance_name=inst_name,
+            file_path=file_path,
+            category=category,
+            action=action_taken,
+            revision_id=revision_id,
+            enabled=enable_rule,
+            alerting=enable_alerting,
+        )
 
     def _manage_alerting(self, rule_id: str, disable: bool) -> Optional[bool]:
         """Temporarily disables alerting to prevent flooding SOAR during retrohunt."""
@@ -695,6 +859,33 @@ class MultiTenantRetrohuntOrchestrator:
         logging.info(f"Selected {len(rule_items)} valid rule candidate(s).")
         return rule_items
 
+    def load_rule_from_file(self, file_path: str) -> List[RuleItem]:
+        """Load a single YARA-L rule file."""
+        fpath = os.path.abspath(file_path)
+        if not os.path.exists(fpath):
+            logging.error(f"Rule file does not exist: {fpath}")
+            return []
+
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            display_name, meta = extract_rule_metadata(content)
+            category = os.path.basename(os.path.dirname(fpath)) or "custom"
+            rule_item = RuleItem(
+                display_name=display_name,
+                file_path=fpath,
+                rule_text=content,
+                category=category,
+                meta=meta,
+            )
+            logging.info(f"Loaded single rule '{display_name}' from '{fpath}'.")
+            return [rule_item]
+        except Exception as e:
+            logging.error(f"Could not read rule file '{fpath}': {e}")
+            return []
+
+
     def load_rules_from_instances(
         self,
         rule_filter: Optional[str] = None,
@@ -810,6 +1001,7 @@ class MultiTenantRetrohuntOrchestrator:
         start_time: datetime,
         end_time: datetime,
         dry_run: bool = False,
+        update_existing: bool = False,
     ):
         """Processes batches of rules for one instance with up to 3 concurrent retrohunts."""
         inst_orchestrator = SecOpsInstanceOrchestrator(
@@ -871,7 +1063,7 @@ class MultiTenantRetrohuntOrchestrator:
                     break
 
                 # 1. Stage rule in instance
-                ok, rule_id, err = inst_orchestrator.stage_rule(rule_item)
+                ok, rule_id, err = inst_orchestrator.stage_rule(rule_item, update_existing=update_existing)
                 if not ok:
                     res = RetrohuntResult(
                         rule_name=rule_item.display_name,
@@ -914,6 +1106,7 @@ class MultiTenantRetrohuntOrchestrator:
         start_time: datetime,
         end_time: datetime,
         dry_run: bool = False,
+        update_existing: bool = False,
     ):
         """Runs batch retrohunts across all target instances in parallel."""
         total_inst = len(self.instances)
@@ -923,13 +1116,15 @@ class MultiTenantRetrohuntOrchestrator:
         logging.info(f"Per-Instance Concurrency: {self.max_concurrent_per_instance} (Tenant Limit: {MAX_CONCURRENT_PER_INSTANCE})")
         logging.info(f"Parallel Instances: {self.max_parallel_instances}")
         logging.info(f"Target Window: {format_rfc3339(start_time)} -> {format_rfc3339(end_time)}")
+        if update_existing:
+            logging.info("Update Existing: Enabled (will update Chronicle rules if local content has changed)")
         logging.info("=" * 70)
 
         # ThreadPoolExecutor across instances
         with ThreadPoolExecutor(max_workers=self.max_parallel_instances) as executor:
             futures = {
                 executor.submit(
-                    self._process_single_instance, inst, rules, start_time, end_time, dry_run
+                    self._process_single_instance, inst, rules, start_time, end_time, dry_run, update_existing
                 ): inst
                 for inst in self.instances
             }
@@ -1020,23 +1215,149 @@ class MultiTenantRetrohuntOrchestrator:
                     ])
             logging.info(f"Exported CSV report: {csv_path}")
 
+    def deploy_rules_all(
+        self,
+        rules: List[RuleItem],
+        update_existing: bool = True,
+        enable_rules: Optional[bool] = None,
+        enable_alerting: Optional[bool] = None,
+        dry_run: bool = False,
+    ) -> List[RuleDeployResult]:
+        """Deploy or update rules across all target instances."""
+        total_inst = len(self.instances)
+        total_rules = len(rules)
+        mode_str = "DRY RUN PREVIEW" if dry_run else "LIVE DEPLOYMENT"
+        logging.info("=" * 70)
+        logging.info(f"STARTING MASS RULE DEPLOYMENT ({mode_str}): {total_inst} Instance(s) x {total_rules} Rule(s)")
+        logging.info(f"Update Existing: {update_existing}")
+        if enable_rules is not None:
+            logging.info(f"Set Rule Enabled: {enable_rules}")
+        if enable_alerting is not None:
+            logging.info(f"Set Alerting Enabled: {enable_alerting}")
+        logging.info("=" * 70)
+
+        deploy_results: List[RuleDeployResult] = []
+        deploy_lock = threading.Lock()
+
+        def process_instance_rules(instance: InstanceTarget):
+            inst_orchestrator = SecOpsInstanceOrchestrator(
+                instance=instance,
+                secops_client=self.secops_client,
+            )
+            for rule_item in rules:
+                res = inst_orchestrator.deploy_rule(
+                    rule_item=rule_item,
+                    update_existing=update_existing,
+                    enable_rule=enable_rules,
+                    enable_alerting=enable_alerting,
+                    dry_run=dry_run,
+                )
+                with deploy_lock:
+                    deploy_results.append(res)
+
+        with ThreadPoolExecutor(max_workers=self.max_parallel_instances) as executor:
+            futures = {executor.submit(process_instance_rules, inst): inst for inst in self.instances}
+            for future in as_completed(futures):
+                inst = futures[future]
+                try:
+                    future.result()
+                    logging.info(f"Finished rule deployment for instance '{inst.display_name}'.")
+                except Exception as e:
+                    logging.error(f"Error during deployment for instance '{inst.display_name}': {e}")
+
+        return deploy_results
+
+    def generate_deploy_summary_table(self, deploy_results: List[RuleDeployResult]) -> str:
+        """Constructs a summary table for rule deployment results."""
+        lines = []
+        header = f"{'INSTANCE':<25} | {'RULE NAME':<35} | {'ACTION':<20} | {'RULE ID':<38}"
+        sep = "-" * len(header)
+        lines.append("\n" + sep)
+        lines.append(header)
+        lines.append(sep)
+
+        action_counts: Dict[str, int] = {}
+        for r in deploy_results:
+            action_counts[r.action] = action_counts.get(r.action, 0) + 1
+            inst_disp = (r.instance_name[:23] + "..") if len(r.instance_name) > 25 else r.instance_name
+            rule_disp = (r.rule_name[:33] + "..") if len(r.rule_name) > 35 else r.rule_name
+            rid_disp = (r.rule_id[:36] + "..") if len(r.rule_id) > 38 else r.rule_id
+            lines.append(f"{inst_disp:<25} | {rule_disp:<35} | {r.action:<20} | {rid_disp:<38}")
+
+        lines.append(sep)
+        lines.append(f"TOTAL INSTANCES: {len(self.instances)} | TOTAL RULES PROCESSED: {len(deploy_results)}")
+        outcomes_str = ", ".join(f"{k}: {v}" for k, v in sorted(action_counts.items()))
+        lines.append(f"OUTCOMES: {outcomes_str}")
+        lines.append(sep + "\n")
+        return "\n".join(lines)
+
+    def export_deploy_reports(
+        self,
+        deploy_results: List[RuleDeployResult],
+        json_path: Optional[str] = None,
+        csv_path: Optional[str] = None,
+    ):
+        """Exports rule deployment results to JSON and CSV reports."""
+        if json_path:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump([asdict(r) for r in deploy_results], f, indent=2)
+            logging.info(f"Exported deployment JSON report: {json_path}")
+
+        if csv_path:
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "instance_name",
+                    "instance_id",
+                    "rule_name",
+                    "rule_id",
+                    "action",
+                    "revision_id",
+                    "enabled",
+                    "alerting",
+                    "error_message",
+                    "file_path",
+                ])
+                for r in deploy_results:
+                    writer.writerow([
+                        r.instance_name,
+                        r.instance_id,
+                        r.rule_name,
+                        r.rule_id,
+                        r.action,
+                        r.revision_id or "",
+                        "" if r.enabled is None else r.enabled,
+                        "" if r.alerting is None else r.alerting,
+                        r.error_message or "",
+                        r.file_path or "",
+                    ])
+            logging.info(f"Exported deployment CSV report: {csv_path}")
+
+
 
 def main():
     parser = argparse.ArgumentParser(
         description="Multi-Tenant Batch Retrohunt Orchestrator for Google SecOps (Chronicle).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # 1. Single Instance Test (Dry-run with 3 rules from workspace)
+  # 1. Mass Deploy / Save Rules to Target SIEM Instance(s) (Deploy-only mode)
+  python3 retrohunt_batch.py --instances-file instances.csv \
+    --rules-dir ./my-modified-rules --update-existing --deploy-only
+
+  # 2. Deploy a single rule file with alerting and live detection enabled
+  python3 retrohunt_batch.py --instances-file instances.csv \
+    --rule-file ./rules/rule_sample.yaral --update-existing --enable-rules --enable-alerting --deploy-only
+
+  # 3. Single Instance Retrohunt Test (Dry-run with 3 rules from workspace)
   python3 retrohunt_batch.py --customer-id YOUR_CUSTOMER_ID --project-id YOUR_PROJECT_ID \
     --rules-dir detection-rules/rules/community/workspace --limit 3 --dry-run
 
-  # 2. Multi-Tenant: Auto-Discover tenant instances via Partner API and run 3 rules
+  # 4. Multi-Tenant Retrohunt: Auto-Discover tenant instances via Partner API and run 5 rules
   python3 retrohunt_batch.py --discover-tenants \
     --parent-instance YOUR_PARENT_INSTANCE_ID --parent-project YOUR_PARENT_PROJECT_ID --region asia-southeast1 \
     --rules-dir detection-rules/rules/community/microsoft --limit 5 --hours 24
 
-  # 3. Multi-Tenant: Load instances from CSV/JSON inventory file and execute batches of 3 rules
+  # 5. Multi-Tenant: Load instances from CSV/JSON inventory file and execute batches of 3 rules
   python3 retrohunt_batch.py --instances-file instances.csv \
     --rules-dir detection-rules/rules/community/workspace --days 7 \
     --max-concurrent-per-instance 3 --max-parallel-instances 5 \
@@ -1112,6 +1433,11 @@ Examples:
         help="Directory of YARA-L detection rules (e.g. detection-rules/rules/community)",
     )
     source_group.add_argument(
+        "--rule-file",
+        type=str,
+        help="Path to a single YARA-L detection rule file (.yaral)",
+    )
+    source_group.add_argument(
         "--use-instance-rules",
         action="store_true",
         help="Use rules already deployed in target Chronicle instance(s) without needing local files",
@@ -1142,6 +1468,31 @@ Examples:
         type=int,
         help="Maximum rules to process per instance (e.g. 5, 20, 100)",
     )
+
+    # Rule Deployment / Direct Save Options
+    deploy_group = parser.add_argument_group("Rule Deployment & Direct Save Controls")
+    deploy_group.add_argument(
+        "--deploy-only",
+        "--deploy-rules",
+        action="store_true",
+        help="Deploy / save rules directly into target SIEM instance(s) without running retrohunts",
+    )
+    deploy_group.add_argument(
+        "--update-existing",
+        action="store_true",
+        help="Update existing rules in Chronicle when rule text has changed (creates a new revision)",
+    )
+    deploy_group.add_argument(
+        "--enable-rules",
+        action="store_true",
+        help="Enable rules in Chronicle for live event streaming evaluation after deployment",
+    )
+    deploy_group.add_argument(
+        "--enable-alerting",
+        action="store_true",
+        help="Enable SOAR alerting on rules after deployment (for live incoming events)",
+    )
+
 
     # Time Window Options
     time_group = parser.add_argument_group("Time Window Options")
@@ -1305,15 +1656,18 @@ Examples:
     # Load Detection Rules
     rules_to_hunt: List[RuleItem] = []
 
-    # 1. Fetch deployed rules directly from target instances
-    if args.use_instance_rules or args.rule_filter or args.rule_ids:
+    # 1. Single rule file specified
+    if args.rule_file:
+        rules_to_hunt = orchestrator.load_rule_from_file(args.rule_file)
+    # 2. Fetch deployed rules directly from target instances
+    elif args.use_instance_rules or args.rule_filter or args.rule_ids:
         r_ids = [x.strip() for x in args.rule_ids.split(",")] if args.rule_ids else None
         rules_to_hunt = orchestrator.load_rules_from_instances(
             rule_filter=args.rule_filter,
             rule_ids=r_ids,
             limit=args.limit,
         )
-    # 2. Load from local rules directory
+    # 3. Load from local rules directory
     else:
         rules_dir = args.rules_dir
         if not rules_dir and os.path.exists("detection-rules/rules/community"):
@@ -1330,14 +1684,31 @@ Examples:
             )
         else:
             logging.error(
-                "No rule source provided. Please specify --rules-dir to load local files, "
+                "No rule source provided. Please specify --rules-dir or --rule-file to load local files, "
                 "or --use-instance-rules / --rule-filter to hunt rules already in Chronicle."
             )
             sys.exit(1)
 
     if not rules_to_hunt:
-        logging.warning("No candidate rules found to retrohunt.")
+        logging.warning("No candidate rules found.")
         sys.exit(0)
+
+    # If --deploy-only is selected, deploy/update rules in Chronicle and exit without running retrohunts
+    if args.deploy_only:
+        deploy_results = orchestrator.deploy_rules_all(
+            rules=rules_to_hunt,
+            update_existing=args.update_existing,
+            enable_rules=True if args.enable_rules else None,
+            enable_alerting=True if args.enable_alerting else None,
+            dry_run=args.dry_run,
+        )
+        print(orchestrator.generate_deploy_summary_table(deploy_results))
+        if not args.dry_run:
+            deploy_json = args.output_json.replace("retrohunt_results_", "rule_deploy_results_")
+            deploy_csv = args.output_csv.replace("retrohunt_results_", "rule_deploy_results_")
+            orchestrator.export_deploy_reports(deploy_results, json_path=deploy_json, csv_path=deploy_csv)
+        sys.exit(0)
+
 
     # Execute Multi-Tenant Batch
     try:
@@ -1346,6 +1717,7 @@ Examples:
             start_time=start_time,
             end_time=end_time,
             dry_run=args.dry_run,
+            update_existing=args.update_existing,
         )
     except KeyboardInterrupt:
         logging.warning("Interrupted by user. Generating summary table...")

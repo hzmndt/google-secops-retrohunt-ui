@@ -11,15 +11,15 @@ Usage:
   python3 test_secops_permissions.py \
     --credentials-path path/to/service_account.json \
     --instances-file instances.csv \
-    --rule-id ru_b0e4c1eb-7335-4902-b933-8cc1bee32cad
+    --rule-id ru_11111111-2222-3333-4444-555555555555
 
   # Test a single SecOps instance directly
   python3 test_secops_permissions.py \
     --credentials-path path/to/service_account.json \
-    --customer-id 08189574-f559-4428-92dd-0314f7723c6f \
-    --project-id apac-workshop-1 \
-    --region asia-southeast1 \
-    --rule-id ru_ca82e120-ad18-4694-b1eb-0d3cb1ed7b57
+    --customer-id 00000000-0000-0000-0000-000000000000 \
+    --project-id sample-secops-project \
+    --region us \
+    --rule-id ru_11111111-2222-3333-4444-555555555555
 """
 
 import argparse
@@ -600,12 +600,12 @@ def main():
     parser.add_argument(
         "--customer-id",
         type=str,
-        help="Chronicle Customer UUID (e.g. 08189574-f559-4428-92dd-0314f7723c6f)",
+        help="Chronicle Customer UUID (e.g. 00000000-0000-0000-0000-000000000000)",
     )
     parser.add_argument(
         "--project-id",
         type=str,
-        help="GCP Project ID hosting the Chronicle instance (e.g. apac-workshop-1)",
+        help="GCP Project ID hosting the Chronicle instance (e.g. sample-secops-project)",
     )
     parser.add_argument(
         "--region",
